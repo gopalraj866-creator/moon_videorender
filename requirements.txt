@@ -1,0 +1,6 @@
+numpy>=1.26
+scipy>=1.11
+opencv-python-headless>=4.8
+pillow>=10.0
+edge-tts>=6.1.9
+gTTS>=2.5
