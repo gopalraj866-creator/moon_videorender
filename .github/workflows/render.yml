@@ -1,0 +1,111 @@
+name: Render "What If the Moon Disappeared?"
+
+on:
+  workflow_dispatch:
+    inputs:
+      quality:
+        description: "full = 1920x1080 (about 12 parallel jobs) | preview = quick 960x540 render scaled to 1080p"
+        type: choice
+        default: full
+        options: [full, preview]
+      voice:
+        description: "Narration voice (edge-tts name), e.g. en-US-GuyNeural, en-GB-RyanNeural, en-IN-PrabhatNeural"
+        default: en-US-GuyNeural
+        required: false
+
+env:
+  CHUNKS: 12
+  VOICE: ${{ inputs.voice || 'en-US-GuyNeural' }}
+  RENDER_SCALE: ${{ inputs.quality == 'preview' && '0.5' || '1.0' }}
+  X264_PRESET: ${{ inputs.quality == 'preview' && 'veryfast' || 'medium' }}
+
+jobs:
+  prepare:
+    name: Textures + narration + music
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg espeak-ng fonts-dejavu-core
+      - name: Python packages
+        run: pip install -r requirements.txt
+      - name: Download real textures (NASA-derived) + build procedural maps
+        run: python -m moonvid.assets
+      - name: Build narration, score and sound design
+        run: python -m moonvid.audio
+      - name: Show narration timing
+        run: python -c "import json;[print('%7.1f-%7.1f %-7s %s'%(t['start'],t['end'],t['engine'],t['text'][:70])) for t in json.load(open('build/narration_timing.json'))]"
+      - uses: actions/upload-artifact@v4
+        with: { name: assets, path: assets, retention-days: 3 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio
+          path: |
+            build/audio.wav
+            build/captions.json
+            build/narration_timing.json
+          retention-days: 14
+
+  render:
+    name: Render chunk ${{ matrix.chunk }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with: { name: assets, path: assets }
+      - uses: actions/download-artifact@v4
+        with: { name: audio, path: build }
+      - name: Render frames ${{ matrix.chunk }} / 12
+        run: python -m moonvid.render --chunk ${{ matrix.chunk }} --chunks ${{ env.CHUNKS }} --workers 4 --out build/chunk_$(printf %02d ${{ matrix.chunk }}).mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.chunk }}
+          path: build/chunk_*.mp4
+          retention-days: 3
+
+  assemble:
+    name: Assemble final video
+    needs: render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with: { pattern: chunk-*, path: build, merge-multiple: true }
+      - uses: actions/download-artifact@v4
+        with: { name: audio, path: build }
+      - name: Concatenate chunks + mux audio
+        run: python -m moonvid.render --assemble build --audio build/audio.wav --out What_If_The_Moon_Disappeared.mp4
+      - name: Description / credits file
+        run: |
+          cat > video_description.txt <<'DESC'
+          What If the Moon Disappeared? Earth Would Never Be the Same
+
+          A cinematic 3D simulation of what would happen to our oceans, nights, climate and life if the Moon vanished tonight.
+
+          Textures: NASA Visible Earth / NASA LRO derived maps (public domain), planet maps from threex.planets, font Montserrat (OFL). Stars, Milky Way, landscapes, music and sound design are procedural.
+          Science notes: lunar tides vanish but solar tides (about 46% as strong) remain; the Moon stabilises Earth's axial tilt over millions of years; no instant catastrophe.
+          DESC
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moon_video_final
+          path: |
+            What_If_The_Moon_Disappeared.mp4
+            video_description.txt
+            build/captions.json
+          retention-days: 30
